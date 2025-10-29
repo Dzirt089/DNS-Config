@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Text;
+using System.Windows;
 
 namespace DNS_Config
 {
@@ -20,7 +21,8 @@ namespace DNS_Config
 					RedirectStandardOutput = true,
 					RedirectStandardError = true,
 					CreateNoWindow = true,
-					Verb = "runas"
+					StandardOutputEncoding = System.Text.Encoding.GetEncoding(866), // ← CP866 (OEM)
+					StandardErrorEncoding = System.Text.Encoding.GetEncoding(866),   // ← CP866
 				}
 			};
 
@@ -29,7 +31,45 @@ namespace DNS_Config
 			string error = process.StandardError.ReadToEnd();
 			process.WaitForExit();
 
-			return process.ExitCode == 0 ? output : throw new Exception(error ?? "Неизвестная ошибка netsh");
+			if (process.ExitCode != 0)
+			{
+				string fullError = $"netsh ошибка (код {process.ExitCode}):\n" +
+								   $"Команда: {args}\n" +
+								   $"Вывод: {error.Trim()}\n" +
+								   $"Стандартный вывод: {output.Trim()}";
+				throw new Exception(fullError);
+			}
+
+			return output;
+		}
+		private static string RunPowerShell(string script)
+		{
+			var process = new Process
+			{
+				StartInfo = new ProcessStartInfo
+				{
+					FileName = "powershell.exe",
+					Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{script}\"",
+					UseShellExecute = false,
+					RedirectStandardOutput = true,
+					RedirectStandardError = true,
+					CreateNoWindow = true,
+					StandardOutputEncoding = System.Text.Encoding.UTF8,  // ← UTF-8
+					StandardErrorEncoding = System.Text.Encoding.UTF8    // ← UTF-8
+				}
+			};
+
+			process.Start();
+			string output = process.StandardOutput.ReadToEnd();
+			string error = process.StandardError.ReadToEnd();
+			process.WaitForExit();
+
+			if (process.ExitCode != 0)
+			{
+				throw new Exception($"PowerShell ошибка:\n{error}\nВывод: {output}");
+			}
+
+			return output;
 		}
 
 		public static NetworkInterface[] GetActiveInterfaces()
@@ -45,38 +85,41 @@ namespace DNS_Config
 		{
 			try
 			{
-				// Проверяем, существует ли интерфейс
 				var nic = GetActiveInterfaces().FirstOrDefault(n => n.Name == interfaceName);
 				if (nic == null) return false;
 
-				string alias = nic.Description; // netsh использует Description, а не Name!
+				string netshName = nic.Name;
 
-				// Сбрасываем старые настройки
-				RunNetsh($"interface ip set dns name=\"{alias}\" source=dhcp");
+				// 1. Сброс DNS
+				RunNetsh($"interface ip set dns name=\"{netshName}\" source=dhcp");
 
+				// 2. Установка статических DNS
 				if (dnsServers != null && dnsServers.Length > 0)
 				{
-					// Устанавливаем статические DNS
-					RunNetsh($"interface ip set dns name=\"{alias}\" static {dnsServers[0]}");
+					RunNetsh($"interface ip set dns name=\"{netshName}\" static {dnsServers[0]}");
 					for (int i = 1; i < dnsServers.Length && i < 2; i++)
 					{
-						RunNetsh($"interface ip add dns name=\"{alias}\" {dnsServers[i]} index={i + 1}");
+						RunNetsh($"interface ip add dns name=\"{netshName}\" {dnsServers[i]} index={i + 1}");
 					}
 				}
 
-				// DoH (только если включено)
+				// 3. DoH через PowerShell
 				if (enableDoh && !string.IsNullOrEmpty(dohTemplate))
 				{
-					RunNetsh($"interface ip set dns name=\"{alias}\" dhcp");
-					RunNetsh($"dns client set dohpolicy interface=\"{alias}\" policy=3 template=\"{dohTemplate}\"");
+					string psScript = $@"
+                    Set-DnsClientDohPolicy -InterfaceAlias '{netshName}' -Policy 3 -Template '{dohTemplate}' -AllowFallbackToUdp:$false;
+                    Write-Output 'DoH включён';
+                ";
+					RunPowerShell(psScript);
 				}
 				else if (enableDoh)
 				{
-					return false; // DoH без шаблона невозможен
+					return false;
 				}
 				else
 				{
-					RunNetsh($"dns client set dohpolicy interface=\"{alias}\" policy=1"); // Отключаем DoH
+					string psScript = $"Set-DnsClientDohPolicy -InterfaceAlias '{netshName}' -Policy 1";
+					RunPowerShell(psScript);
 				}
 
 				FlushDns();
@@ -84,7 +127,7 @@ namespace DNS_Config
 			}
 			catch (Exception ex)
 			{
-				Console.WriteLine($"Ошибка: {ex.Message}");
+				MessageBox.Show($"Ошибка: {ex.Message}");
 				return false;
 			}
 		}
@@ -96,17 +139,17 @@ namespace DNS_Config
 				var nic = GetActiveInterfaces().FirstOrDefault(n => n.Name == interfaceName);
 				if (nic == null) return false;
 
-				string alias = nic.Description;
+				string netshName = nic.Name;
 
-				RunNetsh($"interface ip set dns name=\"{alias}\" source=dhcp");
-				RunNetsh($"dns client set dohpolicy interface=\"{alias}\" policy=1");
+				RunNetsh($"interface ip set dns name=\"{netshName}\" source=dhcp");
+				RunPowerShell($"Set-DnsClientDohPolicy -InterfaceAlias '{netshName}' -Policy 1");
 
 				FlushDns();
 				return true;
 			}
 			catch (Exception ex)
 			{
-				Console.WriteLine($"Ошибка: {ex.Message}");
+				MessageBox.Show($"Ошибка: {ex.Message}");
 				return false;
 			}
 		}
