@@ -1,77 +1,70 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using Microsoft.Win32;
+
 using System.Diagnostics;
+using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Text;
-using System.Windows;
 
 namespace DNS_Config
 {
 	public static class DnsManager
 	{
-		private static string RunNetsh(string args)
+		private static Action<string>? StatusUpdate;
+
+		static DnsManager()
 		{
-			var process = new Process
-			{
-				StartInfo = new ProcessStartInfo
-				{
-					FileName = "netsh.exe",
-					Arguments = args,
-					UseShellExecute = false,
-					RedirectStandardOutput = true,
-					RedirectStandardError = true,
-					CreateNoWindow = true,
-					// CP866 теперь доступна!
-					StandardOutputEncoding = Encoding.GetEncoding(866),
-					StandardErrorEncoding = Encoding.GetEncoding(866)
-				}
-			};
-
-			process.Start();
-			string output = process.StandardOutput.ReadToEnd();
-			string error = process.StandardError.ReadToEnd();
-			process.WaitForExit();
-
-			if (process.ExitCode != 0)
-			{
-				string fullError = $"netsh ошибка (код {process.ExitCode}):\n" +
-								   $"Команда: {args}\n" +
-								   $"Ошибка: {error.Trim()}\n" +
-								   $"Вывод: {output.Trim()}";
-				throw new Exception(fullError);
-			}
-
-			return output;
+			Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+			_httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
 		}
 
-		private static string RunPowerShell(string script)
+		public static void Initialize(Action<string> statusCallback)
 		{
-			var process = new Process
-			{
-				StartInfo = new ProcessStartInfo
-				{
-					FileName = "powershell.exe",
-					Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{script}\"",
-					UseShellExecute = false,
-					RedirectStandardOutput = true,
-					RedirectStandardError = true,
-					CreateNoWindow = true,
-					StandardOutputEncoding = System.Text.Encoding.UTF8,  // ← UTF-8
-					StandardErrorEncoding = System.Text.Encoding.UTF8    // ← UTF-8
-				}
-			};
+			StatusUpdate = statusCallback ?? throw new ArgumentNullException(nameof(statusCallback));
+		}
+		private static string? GetNetworkProfileGuid(string interfaceName)
+		{
+			string profilesPath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles";
+			using var profilesKey = Registry.LocalMachine.OpenSubKey(profilesPath);
+			if (profilesKey == null) return null;
 
-			process.Start();
-			string output = process.StandardOutput.ReadToEnd();
-			string error = process.StandardError.ReadToEnd();
-			process.WaitForExit();
-
-			if (process.ExitCode != 0)
+			foreach (string guid in profilesKey.GetSubKeyNames())
 			{
-				throw new Exception($"PowerShell ошибка:\n{error}\nВывод: {output}");
+				using var profileKey = profilesKey.OpenSubKey(guid);
+				string? profileName = profileKey?.GetValue("ProfileName") as string;
+				string? description = profileKey?.GetValue("Description") as string;
+
+				// Ищем по ProfileName или Description
+				if (profileName == interfaceName || description == interfaceName)
+					return guid;
 			}
+			return null;
+		}
+		private static void SetDohViaProfile(string interfaceName, bool enable, string? template = null)
+		{
+			// 1. Находим GUID профиля по имени интерфейса
+			string? profileGuid = GetNetworkProfileGuid(interfaceName);
+			if (profileGuid == null)
+				throw new Exception($"Профиль сети для '{interfaceName}' не найден.");
 
-			return output;
+			string path = $@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\{profileGuid}\DnsOverHttps";
+
+			using var key = Registry.LocalMachine.CreateSubKey(path);
+			if (enable && !string.IsNullOrEmpty(template))
+			{
+				key.SetValue("Enabled", 1, RegistryValueKind.DWord);
+				key.SetValue("Template", template, RegistryValueKind.String);
+				key.SetValue("AllowFallback", 0, RegistryValueKind.DWord);
+			}
+			else
+			{
+				key.DeleteValue("Enabled", throwOnMissingValue: false);
+				key.DeleteValue("Template", throwOnMissingValue: false);
+				key.DeleteValue("AllowFallback", throwOnMissingValue: false);
+			}
+		}
+		private static void UpdateStatus(string message)
+		{
+			StatusUpdate?.Invoke(message);
 		}
 
 		public static NetworkInterface[] GetActiveInterfaces()
@@ -83,53 +76,148 @@ namespace DNS_Config
 				.ToArray();
 		}
 
-		public static bool SetDns(string interfaceName, string[] dnsServers, bool enableDoh = false, string dohTemplate = null)
+		private static string RunCommand(string fileName, string args, Encoding encoding)
+		{
+			var process = new Process
+			{
+				StartInfo = new ProcessStartInfo
+				{
+					FileName = fileName,
+					Arguments = args,
+					UseShellExecute = false,
+					RedirectStandardOutput = true,
+					RedirectStandardError = true,
+					CreateNoWindow = true,
+					StandardOutputEncoding = encoding,
+					StandardErrorEncoding = encoding
+				}
+			};
+
+			process.Start();
+			string output = process.StandardOutput.ReadToEnd();
+			string error = process.StandardError.ReadToEnd();
+			process.WaitForExit();
+
+			if (process.ExitCode != 0)
+			{
+				if (error.Contains("уже запущена") || error.Contains("already started") ||
+					error.Contains("невозможно") || error.Contains("2191") || error.Contains("2182"))
+				{
+					return output;
+				}
+
+				throw new Exception($"{fileName} ошибка (код {process.ExitCode}):\nКоманда: {args}\nОшибка: {error}\nВывод: {output}");
+			}
+
+			return output;
+		}
+
+		private static string RunNetsh(string args) => RunCommand("netsh.exe", args, Encoding.GetEncoding(866));
+		private static string RunNet(string args) => RunCommand("net.exe", args, Encoding.GetEncoding(866));
+
+		private static readonly HttpClient _httpClient = new HttpClient
+		{
+			Timeout = TimeSpan.FromSeconds(10)
+		};
+
+
+		private static async Task<bool> TestDohServerAsync(string template)
+		{
+			try
+			{
+				string testUrl = $"{template}?dns=AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB";
+				var response = await _httpClient.GetAsync(testUrl);
+				return response.IsSuccessStatusCode &&
+					   response.Content.Headers.ContentType?.MediaType?.Contains("dns-message") == true;
+			}
+			catch
+			{
+				return false;
+			}
+		}
+
+		private static bool TestDohServer(string template)
+		{
+			return Task.Run(() => TestDohServerAsync(template)).GetAwaiter().GetResult();
+		}
+
+		private static void SetDohViaRegistry(string interfaceName, bool enable, string? template = null)
+		{
+			string path = $@"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DohInterfaceSettings\{interfaceName}";
+
+			using var key = Registry.LocalMachine.CreateSubKey(path);
+			if (enable && !string.IsNullOrEmpty(template))
+			{
+				key.SetValue("Enabled", 1, RegistryValueKind.DWord);
+				key.SetValue("ServerTemplate", template, RegistryValueKind.String);
+				key.SetValue("FallbackAllowed", 0, RegistryValueKind.DWord);
+			}
+			else
+			{
+				key.DeleteValue("Enabled", throwOnMissingValue: false);
+				key.DeleteValue("ServerTemplate", throwOnMissingValue: false);
+				key.DeleteValue("FallbackAllowed", throwOnMissingValue: false);
+			}
+		}
+
+		private static void ApplyDnsChanges()
+		{
+			try { RunCommand("ipconfig.exe", "/flushdns", Encoding.GetEncoding(866)); } catch { }
+			try { RunNetsh("interface ip delete arpcache"); } catch { }
+		}
+
+		public static bool SetDns(string interfaceName, string[] dnsServers, bool enableDoh = false, string? dohTemplate = null)
 		{
 			try
 			{
 				var nic = GetActiveInterfaces().FirstOrDefault(n => n.Name == interfaceName);
-				if (nic == null) return false;
+				if (nic == null)
+				{
+					UpdateStatus("Интерфейс не найден.");
+					return false;
+				}
 
 				string netshName = nic.Name;
+				UpdateStatus($"Интерфейс: {netshName}");
 
-				// 1. Сброс DNS
 				RunNetsh($"interface ip set dns name=\"{netshName}\" source=dhcp");
 
-				// 2. Установка статических DNS
-				if (dnsServers != null && dnsServers.Length > 0)
+				if (dnsServers?.Length > 0)
 				{
 					RunNetsh($"interface ip set dns name=\"{netshName}\" static {dnsServers[0]}");
 					for (int i = 1; i < dnsServers.Length && i < 2; i++)
-					{
 						RunNetsh($"interface ip add dns name=\"{netshName}\" {dnsServers[i]} index={i + 1}");
-					}
+					UpdateStatus($"DNS: {string.Join(", ", dnsServers)}");
 				}
 
-				// 3. DoH через PowerShell
 				if (enableDoh && !string.IsNullOrEmpty(dohTemplate))
 				{
-					string psScript = $@"
-                    Set-DnsClientDohPolicy -InterfaceAlias '{netshName}' -Policy 3 -Template '{dohTemplate}' -AllowFallbackToUdp:$false;
-                    Write-Output 'DoH включён';
-                ";
-					RunPowerShell(psScript);
+					//if (!TestDohServer(dohTemplate))
+					//{
+					//	UpdateStatus($"DoH-сервер недоступен: {dohTemplate}");
+					//	return false;
+					//}
+					SetDohViaRegistry(netshName, true, dohTemplate);
+					UpdateStatus($"DoH: {dohTemplate}");
 				}
 				else if (enableDoh)
 				{
+					UpdateStatus("DoH включён, но шаблон пуст.");
 					return false;
 				}
 				else
 				{
-					string psScript = $"Set-DnsClientDohPolicy -InterfaceAlias '{netshName}' -Policy 1";
-					RunPowerShell(psScript);
+					SetDohViaRegistry(netshName, false);
+					UpdateStatus("DoH отключён");
 				}
 
-				FlushDns();
+				ApplyDnsChanges();
+				UpdateStatus("Готово!");
 				return true;
 			}
 			catch (Exception ex)
 			{
-				MessageBox.Show($"Ошибка: {ex.Message}");
+				UpdateStatus($"Ошибка: {ex.Message}");
 				return false;
 			}
 		}
@@ -139,32 +227,24 @@ namespace DNS_Config
 			try
 			{
 				var nic = GetActiveInterfaces().FirstOrDefault(n => n.Name == interfaceName);
-				if (nic == null) return false;
+				if (nic == null)
+				{
+					UpdateStatus("Интерфейс не найден.");
+					return false;
+				}
 
 				string netshName = nic.Name;
-
 				RunNetsh($"interface ip set dns name=\"{netshName}\" source=dhcp");
-				RunPowerShell($"Set-DnsClientDohPolicy -InterfaceAlias '{netshName}' -Policy 1");
-
-				FlushDns();
+				SetDohViaRegistry(netshName, false);
+				ApplyDnsChanges();
+				UpdateStatus("Сброшено на DHCP");
 				return true;
 			}
 			catch (Exception ex)
 			{
-				MessageBox.Show($"Ошибка: {ex.Message}");
+				UpdateStatus($"Ошибка: {ex.Message}");
 				return false;
 			}
-		}
-
-		private static void FlushDns()
-		{
-			Process.Start(new ProcessStartInfo
-			{
-				FileName = "ipconfig",
-				Arguments = "/flushdns",
-				UseShellExecute = false,
-				CreateNoWindow = true
-			})?.WaitForExit();
 		}
 	}
 }

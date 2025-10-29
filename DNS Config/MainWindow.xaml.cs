@@ -1,14 +1,4 @@
-﻿using System.Text;
-using System.Windows;
-using System;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Navigation;
-using System.Windows.Shapes;
+﻿using System.Windows;
 
 namespace DNS_Config
 {
@@ -23,6 +13,7 @@ namespace DNS_Config
 		public MainWindow()
 		{
 			InitializeComponent();
+			DnsManager.Initialize(s => StatusText.Text = s); // ← UI-обновление
 			LoadInterfaces();
 		}
 
@@ -37,19 +28,13 @@ namespace DNS_Config
 		private void SetCustomDnsButton_Click(object sender, RoutedEventArgs e)
 		{
 			if (InterfaceComboBox.SelectedItem is not string name) return;
-
-			bool success = DnsManager.SetDns(name, CustomDns, enableDoh: true, dohTemplate: DohTemplate);
-			StatusText.Text = success
-				? "Кастомные DNS + DoH установлены!"
-				: "Ошибка! Запустите от имени администратора.";
+			DnsManager.SetDns(name, CustomDns, enableDoh: true, dohTemplate: DohTemplate);
 		}
 
 		private void SetDefaultDnsButton_Click(object sender, RoutedEventArgs e)
 		{
 			if (InterfaceComboBox.SelectedItem is not string name) return;
-
-			bool success = DnsManager.ResetDns(name);
-			StatusText.Text = success ? "DNS сброшены на DHCP" : "Ошибка сброса!";
+			DnsManager.ResetDns(name);
 		}
 	}
 }
