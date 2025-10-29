@@ -21,8 +21,9 @@ namespace DNS_Config
 					RedirectStandardOutput = true,
 					RedirectStandardError = true,
 					CreateNoWindow = true,
-					StandardOutputEncoding = System.Text.Encoding.GetEncoding(866), // ← CP866 (OEM)
-					StandardErrorEncoding = System.Text.Encoding.GetEncoding(866),   // ← CP866
+					// CP866 теперь доступна!
+					StandardOutputEncoding = Encoding.GetEncoding(866),
+					StandardErrorEncoding = Encoding.GetEncoding(866)
 				}
 			};
 
@@ -35,13 +36,14 @@ namespace DNS_Config
 			{
 				string fullError = $"netsh ошибка (код {process.ExitCode}):\n" +
 								   $"Команда: {args}\n" +
-								   $"Вывод: {error.Trim()}\n" +
-								   $"Стандартный вывод: {output.Trim()}";
+								   $"Ошибка: {error.Trim()}\n" +
+								   $"Вывод: {output.Trim()}";
 				throw new Exception(fullError);
 			}
 
 			return output;
 		}
+
 		private static string RunPowerShell(string script)
 		{
 			var process = new Process
