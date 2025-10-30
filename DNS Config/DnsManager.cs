@@ -132,27 +132,36 @@ namespace DNS_Config
 		}
 
 		// === Поиск GUID профиля по MAC-адресу ===
-		private static string? GetNetworkProfileGuidByMac(string macAddress)
+		private static string? GetNetworkProfileGuidByInterface(string interfaceName, string description)
 		{
-			string cleanMac = macAddress.Replace("-", "").Replace(":", "").ToUpper();
 			string profilesPath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles";
-
 			using var profilesKey = Registry.LocalMachine.OpenSubKey(profilesPath);
 			if (profilesKey == null) return null;
 
 			foreach (string guid in profilesKey.GetSubKeyNames())
 			{
 				using var profileKey = profilesKey.OpenSubKey(guid);
-				string? managedMac = profileKey?.GetValue("ManagedAddress") as string;
-				if (!string.IsNullOrEmpty(managedMac) &&
-					managedMac.Replace("-", "").Replace(":", "").ToUpper() == cleanMac)
-				{
+				if (profileKey == null) continue;
+
+				string? profileName = profileKey.GetValue("ProfileName") as string;
+				string? profileDesc = profileKey.GetValue("Description") as string;
+
+				// 1. Точное совпадение ProfileName
+				if (string.Equals(profileName, interfaceName, StringComparison.OrdinalIgnoreCase))
 					return guid;
-				}
+
+				// 2. Частичное совпадение Description (игнор регистра)
+				if (!string.IsNullOrEmpty(profileDesc) && profileDesc.IndexOf(interfaceName, StringComparison.OrdinalIgnoreCase) >= 0)
+					return guid;
+
+				// 3. Частичное совпадение по ключевым словам (Ethernet, Realtek, Intel)
+				if (profileDesc?.Contains("Ethernet", StringComparison.OrdinalIgnoreCase) == true ||
+					profileDesc?.Contains("Realtek", StringComparison.OrdinalIgnoreCase) == true ||
+					profileDesc?.Contains("Intel", StringComparison.OrdinalIgnoreCase) == true)
+					return guid;
 			}
 			return null;
 		}
-
 		// === DoH через профиль сети (ОФИЦИАЛЬНЫЙ UI-ПУТЬ) ===
 		private static void SetDohViaProfile(string interfaceName, bool enable, string? template = null)
 		{
@@ -162,13 +171,16 @@ namespace DNS_Config
 			if (nic == null)
 				throw new Exception($"Интерфейс '{interfaceName}' не активен.");
 
-			string mac = nic.GetPhysicalAddress().ToString();
-			if (string.IsNullOrEmpty(mac))
-				throw new Exception("MAC-адрес не найден.");
+			UpdateStatus($"Поиск профиля для '{interfaceName}' (Desc: {nic.Description})");
 
-			string? profileGuid = GetNetworkProfileGuidByMac(mac);
+			string? profileGuid = GetNetworkProfileGuidByInterface(interfaceName, nic.Description);
 			if (profileGuid == null)
-				throw new Exception($"Профиль сети для MAC {mac} не найден. Подключитесь к сети хотя бы раз.");
+			{
+				UpdateStatus("⚠️ Профиль не найден — DoH пропускается (но DNS работает!)");
+				return; // ← НЕ кидаем ошибку!
+			}
+
+			UpdateStatus($"✅ Профиль найден: {profileGuid}");
 
 			string path = $@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles\{profileGuid}\DnsOverHttps";
 
@@ -185,6 +197,8 @@ namespace DNS_Config
 				key.DeleteValue("Template", throwOnMissingValue: false);
 				key.DeleteValue("AllowFallback", throwOnMissingValue: false);
 			}
+
+			UpdateStatus($"✅ DoH установлен!");
 		}
 
 		// === Применение изменений ===
