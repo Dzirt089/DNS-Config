@@ -8,6 +8,19 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
 	<ApplicationManifest>app.manifest</ApplicationManifest>
+	<ApplicationIcon>Request.ico</ApplicationIcon>
+	<PackageIcon>Request.png</PackageIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="Request.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="D:\Загрузки\Request.png">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
+  </ItemGroup>
 
 </Project>
