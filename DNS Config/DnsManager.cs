@@ -154,7 +154,7 @@ namespace DNS_Config
 				// 3. Частичное совпадение по ключевым словам (Ethernet, Realtek, Intel)
 				if (profileDesc?.Contains("Ethernet", StringComparison.OrdinalIgnoreCase) == true ||
 					profileDesc?.Contains("Realtek", StringComparison.OrdinalIgnoreCase) == true ||
-					profileDesc?.Contains("Intel", StringComparison.OrdinalIgnoreCase) == true ||
+					profileDesc?.Contains("Сеть", StringComparison.OrdinalIgnoreCase) == true ||
 					(profileDesc?.Equals("HUAWEI-1CF69K_5G", StringComparison.OrdinalIgnoreCase) == true && profileName?.Equals(profileDesc, StringComparison.OrdinalIgnoreCase) == true))
 					return guid;
 			}
